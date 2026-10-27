@@ -300,11 +300,14 @@ def main() -> None:
 
     current_rules = load_config()
     rules_dataframe = pd.DataFrame(current_rules, columns=["关键词", "拼单价"])
+    # 临时“删除？”勾选列：勾选后点击“删除勾选规则”即可移除，不影响保存内容。
+    rules_dataframe["删除？"] = False
     edited_rules = st.data_editor(
         rules_dataframe,
         column_config={
             "关键词": st.column_config.TextColumn("关键词", required=True),
             "拼单价": st.column_config.NumberColumn("拼单价", min_value=0.0, format="%.2f", required=True),
+            "删除？": st.column_config.CheckboxColumn("删除？", help="勾选要删除的规则，再点击“删除勾选规则”按钮"),
         },
         num_rows="dynamic",
         hide_index=True,
@@ -312,18 +315,40 @@ def main() -> None:
         key="price_rules_editor",
     )
 
-    if st.button("保存配置", use_container_width=True):
-        try:
-            valid_rules = clean_rules(edited_rules)
-            saved = write_config(valid_rules)
-            if saved and cloud_mode():
-                st.success(f"已保存 {len(valid_rules)} 条规则到云端 GitHub 仓库，永久有效。")
-            elif saved:
-                st.success(f"已保存 {len(valid_rules)} 条规则到 {CONFIG_PATH.name}。")
-            else:
-                st.error("云端保存失败（可能网络不通或令牌无效），本次修改仅临时保存在云端容器，重启后会恢复。请检查设置。")
-        except ValueError as error:
-            st.error(f"配置未保存：{error}")
+    save_column, delete_column = st.columns(2)
+    with save_column:
+        if st.button("保存配置", use_container_width=True):
+            try:
+                valid_rules = clean_rules(edited_rules)
+                saved = write_config(valid_rules)
+                if saved and cloud_mode():
+                    st.success(f"已保存 {len(valid_rules)} 条规则到云端 GitHub 仓库，永久有效。")
+                elif saved:
+                    st.success(f"已保存 {len(valid_rules)} 条规则到 {CONFIG_PATH.name}。")
+                else:
+                    st.error("云端保存失败（可能网络不通或令牌无效），本次修改仅临时保存在云端容器，重启后会恢复。请检查设置。")
+            except ValueError as error:
+                st.error(f"配置未保存：{error}")
+
+    with delete_column:
+        if st.button("删除勾选规则", type="secondary", use_container_width=True):
+            try:
+                marked = edited_rules["删除？"].fillna(False).astype(bool)
+                deleted_count = int(marked.sum())
+                remaining = edited_rules.loc[~marked].drop(columns=["删除？"]).reset_index(drop=True)
+                valid_rules = clean_rules(remaining)
+                saved = write_config(valid_rules)
+                if saved and cloud_mode():
+                    st.success(f"已删除 {deleted_count} 条规则，剩余 {len(valid_rules)} 条已保存到云端 GitHub 仓库，永久有效。")
+                elif saved:
+                    st.success(f"已删除 {deleted_count} 条规则，剩余 {len(valid_rules)} 条已保存到 {CONFIG_PATH.name}。")
+                else:
+                    st.error("云端保存失败（可能网络不通或令牌无效），本次修改仅临时保存在云端容器，重启后会恢复。请检查设置。")
+                # 清除表格编辑缓存并刷新，让列表显示删除后的最新规则。
+                st.session_state.pop("price_rules_editor", None)
+                st.rerun()
+            except ValueError as error:
+                st.error(f"删除未生效：{error}")
 
     st.divider()
     if st.button("开始处理", type="primary", use_container_width=True):
