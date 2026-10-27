@@ -4,13 +4,19 @@
     pip install streamlit pandas openpyxl
     streamlit run streamlit_pdd_price_app.py
 
-首次启动会在本脚本同目录自动创建 config.json，用于永久保存价格规则。
+规则存储说明：
+- 本地运行（未配置 GITHUB_TOKEN）：规则保存在本脚本同目录的 config.json。
+- 云端运行（Streamlit Community Cloud 中配置了 GITHUB_TOKEN 等 Secrets）：
+  规则通过 GitHub API 保存到仓库里的 config.json，永久有效、多人共用。
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import math
+import urllib.error
+import urllib.request
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -24,6 +30,7 @@ st.set_page_config(page_title="拼多多商品批量改价", page_icon="💰", l
 
 CONFIG_PATH = Path(__file__).resolve().with_name("config.json")
 REQUIRED_COLUMNS = ["商品名称", "规格名称", "单买价", "拼单价"]
+GITHUB_API = "https://api.github.com"
 
 # 首次运行时写入本地 config.json 的默认规则，可在页面中自行调整。
 DEFAULT_RULES = [
@@ -43,14 +50,122 @@ DEFAULT_RULES = [
 ]
 
 
-def write_config(rules: list[dict[str, Any]]) -> None:
-    """将规则写入本地 JSON；ensure_ascii=False 保证中文可读。"""
+def cloud_mode() -> bool:
+    """是否处于云端模式：配置了 GITHUB_TOKEN 时走 GitHub 仓库存储。"""
+    try:
+        _ = st.secrets["GITHUB_TOKEN"]
+        return True
+    except Exception:
+        return False
+
+
+def _github_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {st.secrets['GITHUB_TOKEN']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_repo() -> str:
+    return st.secrets.get("GITHUB_REPO", "suyigeee-hue/pdd-price-app")
+
+
+def _github_path() -> str:
+    return st.secrets.get("GITHUB_CONFIG_PATH", "config.json")
+
+
+def _github_get_file() -> list[dict[str, Any]] | None:
+    """从 GitHub 仓库读取 config.json 并返回规则列表；文件不存在时返回 None。"""
+    url = f"{GITHUB_API}/repos/{_github_repo()}/contents/{_github_path()}"
+    request = urllib.request.Request(url, headers=_github_headers())
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise error
+    content = body.get("content", "")
+    raw_text = base64.b64decode(content).decode("utf-8")
+    saved_config = json.loads(raw_text)
+    rules = saved_config.get("price_rules", [])
+    if not isinstance(rules, list):
+        raise ValueError("price_rules 不是列表")
+    return rules
+
+
+def _github_write_file(rules: list[dict[str, Any]]) -> None:
+    """把规则列表写回 GitHub 仓库的 config.json（自动附带 sha 完成更新）。"""
+    url = f"{GITHUB_API}/repos/{_github_repo()}/contents/{_github_path()}"
+    headers = _github_headers()
+
+    # 先读取当前文件的 sha（GitHub 更新文件必须携带原 sha）。
+    sha: str | None = None
+    get_request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(get_request, timeout=15) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            sha = body.get("sha")
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise error
+        sha = None  # 仓库中尚无 config.json，直接新建。
+
+    new_content = json.dumps({"price_rules": rules}, ensure_ascii=False, indent=2).encode("utf-8")
+    payload = {
+        "message": "Update price rules from web app",
+        "content": base64.b64encode(new_content).decode("ascii"),
+    }
+    if sha:
+        payload["sha"] = sha
+
+    put_request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={**headers, "Content-Type": "application/json"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(put_request, timeout=15) as response:
+        response.read()
+
+
+def write_config(rules: list[dict[str, Any]]) -> bool:
+    """保存规则。云端模式写回 GitHub 仓库；本地模式写本地 JSON。
+
+    返回 True 表示保存成功；云端写入失败时返回 False（并回退写入本地文件）。
+    """
+    if cloud_mode():
+        try:
+            _github_write_file(rules)
+            return True
+        except Exception:
+            # 云端写入失败时回退到本地文件，避免本次编辑丢失。
+            try:
+                with CONFIG_PATH.open("w", encoding="utf-8") as config_file:
+                    json.dump({"price_rules": rules}, config_file, ensure_ascii=False, indent=2)
+            except OSError:
+                pass
+            return False
+
     with CONFIG_PATH.open("w", encoding="utf-8") as config_file:
         json.dump({"price_rules": rules}, config_file, ensure_ascii=False, indent=2)
+    return True
 
 
 def load_config() -> list[dict[str, Any]]:
-    """读取配置；首次启动或配置损坏时使用并保存默认规则。"""
+    """读取规则。云端模式优先从 GitHub 仓库读取，失败时回退本地；本地模式读本地文件。
+
+    首次启动或配置损坏时使用并保存默认规则。
+    """
+    if cloud_mode():
+        try:
+            rules = _github_get_file()
+            if rules is not None:
+                return rules
+        except Exception:
+            pass  # 云端读取失败时回退到本地文件。
+
     if not CONFIG_PATH.exists():
         write_config(DEFAULT_RULES)
         return DEFAULT_RULES.copy()
@@ -162,7 +277,11 @@ def main() -> None:
     uploaded_file = st.file_uploader("上传拼多多商品 Excel 文件（.xlsx）", type=["xlsx"])
 
     st.subheader("价格规则")
-    st.caption("可直接增删改。处理时总是优先匹配更长的关键词；相同长度则按当前表格顺序匹配。")
+    if cloud_mode():
+        st.caption("当前规则存储：云端 GitHub 仓库（保存后永久生效，所有人共用同一套规则）。")
+    else:
+        st.caption("当前规则存储：本地 config.json（仅本机网页生效）。")
+
     current_rules = load_config()
     rules_dataframe = pd.DataFrame(current_rules, columns=["关键词", "拼单价"])
     edited_rules = st.data_editor(
@@ -180,8 +299,13 @@ def main() -> None:
     if st.button("保存配置", use_container_width=True):
         try:
             valid_rules = clean_rules(edited_rules)
-            write_config(valid_rules)
-            st.success(f"已保存 {len(valid_rules)} 条规则到 {CONFIG_PATH.name}。")
+            saved = write_config(valid_rules)
+            if saved and cloud_mode():
+                st.success(f"已保存 {len(valid_rules)} 条规则到云端 GitHub 仓库，永久有效。")
+            elif saved:
+                st.success(f"已保存 {len(valid_rules)} 条规则到 {CONFIG_PATH.name}。")
+            else:
+                st.error("云端保存失败（可能网络不通或令牌无效），本次修改仅临时保存在云端容器，重启后会恢复。请检查设置。")
         except ValueError as error:
             st.error(f"配置未保存：{error}")
 
