@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import urllib.error
 import urllib.request
 from io import BytesIO
@@ -220,15 +221,30 @@ def clean_rules(edited_rules: pd.DataFrame) -> list[dict[str, Any]]:
     return rules
 
 
+# 尺寸单位归一化：把“厘米”“CM”“Cm”“cM”统一成小写 cm，用于关键词匹配。
+# 例如商品规格里写“10CM”或“10厘米”，也能命中规则关键词“10cm”。
+_SIZE_UNIT_RE = re.compile(r"厘米|[Cc][Mm]")
+
+
+def normalize_size_text(text: str) -> str:
+    """把文本中厘米的各种写法统一为小写 cm（不改变其余内容）。"""
+    return _SIZE_UNIT_RE.sub("cm", text)
+
+
 def find_matched_rule(product_name: object, spec_name: object, rules: list[dict[str, Any]]) -> dict[str, Any] | None:
     """按关键词长度从长到短匹配，并在命中第一条后立即停止。"""
     product_text = "" if pd.isna(product_name) else str(product_name)
     spec_text = "" if pd.isna(spec_name) else str(spec_name)
 
+    # 匹配前把商品文本与关键词中的尺寸单位写法统一（“厘米”“CM”“cm”等同义）。
+    product_text = normalize_size_text(product_text)
+    spec_text = normalize_size_text(spec_text)
+
     # reverse=True 表示“猫耳10cm”优先于“10cm”。长度相同则保持配置中的原有顺序。
     sorted_rules = sorted(rules, key=lambda rule: len(rule["关键词"]), reverse=True)
     for rule in sorted_rules:
-        if rule["关键词"] in product_text or rule["关键词"] in spec_text:
+        keyword = normalize_size_text(rule["关键词"])
+        if keyword in product_text or keyword in spec_text:
             return rule  # 命中最高优先级规则后立即结束本行匹配。
     return None
 
