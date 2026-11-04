@@ -53,11 +53,13 @@ DEFAULT_RULES = [
 
 def cloud_mode() -> bool:
     """是否处于云端模式：配置了 GITHUB_TOKEN 时走 GitHub 仓库存储。"""
-    try:
-        _ = st.secrets["GITHUB_TOKEN"]
-        return True
-    except Exception:
-        return False
+    # 临时禁用云端模式测试：排查启动崩溃问题
+    return False
+    # try:
+    #     _ = st.secrets["GITHUB_TOKEN"]
+    #     return True
+    # except Exception:
+    #     return False
 
 
 def _github_headers() -> dict[str, str]:
